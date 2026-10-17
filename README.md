@@ -3,6 +3,7 @@
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
 [![Platform](https://img.shields.io/badge/Platform-macOS%20%7C%20Windows%20x64-lightgrey.svg)](#installation--usage)
 [![Release](https://img.shields.io/badge/Release-v1.2.0-brightgreen.svg)](https://github.com/uawannacry/ets2-spatial-radio/releases)
+[![Ko-fi](https://img.shields.io/badge/Ko--fi-Support%20Me-ff5e5b?logo=ko-fi&logoColor=white)](https://ko-fi.com/uawannacry)
 [![Game](https://img.shields.io/badge/Euro%20Truck%20Simulator%202-Compatible-orange.svg)](https://store.steampowered.com/app/227300/Euro_Truck_Simulator_2/)
 
 A native, zero-compromise real-time 3D spatial audio companion for **Euro Truck Simulator 2** on **macOS** and **Windows (64-bit)**. 
@@ -179,6 +180,16 @@ Contributions, feature suggestions, and bug reports are welcome!
 3. Commit your changes (`git commit -m 'Add new acoustic reflection filter'`).
 4. Push to the branch (`git push origin feature/awesome-spatial-tweak`).
 5. Open a Pull Request.
+
+---
+
+## ☕ Support
+
+If you enjoy using **ETS2 Cabin Radio** and want to support its development, maintenance, and future updates, consider buying me a coffee:
+
+[![Support me on Ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/uawannacry)
+
+Direct link: [ko-fi.com/uawannacry](https://ko-fi.com/uawannacry)
 
 ---
 

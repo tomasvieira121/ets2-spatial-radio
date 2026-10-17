@@ -57,3 +57,9 @@ d5374055167c58f89b324468a83f5f8435d2215968985d2d37257169320b90eb  ETS2-Cabin-Rad
 2. Ensure `ETS2 Cabin Radio.exe` and `ETS2CabinDSP.dll` are kept in the same directory.
 3. Run `ETS2 Cabin Radio.exe` and click **Launch / Attach Live DSP**.
    - *Optional*: Click **Install Steam Auto-Plugin** to automatically load the DSP whenever ETS2 is started directly from Steam.
+
+---
+
+### Support the Project
+If you enjoy ETS2 Cabin Radio, consider supporting further development and updates on [Ko-fi](https://ko-fi.com/uawannacry)!
+
