@@ -82,6 +82,14 @@ typedef struct {
     size_t peek_pos;
 } StreamSocket;
 
+/* GENA Event Subscription slot (for RenderingControl & AVTransport LastChange events) */
+typedef struct {
+    char callback_url[512];
+    char sid[128];
+    uint32_t seq;
+    bool active;
+} UpnpSubscription;
+
 static bool g_upnp_initialized = false;
 static bool g_upnp_enabled = false;
 static bool g_upnp_running = false;
@@ -110,7 +118,11 @@ static char g_next_uri[1024] = "";
 static char g_track_duration[32] = "00:04:00";
 static volatile uint64_t g_played_samples = 0;
 static float g_upnp_volume = 1.0f;
+static int g_upnp_volume_pct = 100;
 static bool g_upnp_muted = false;
+
+static UpnpSubscription g_sub_rc  = { "", "uuid:" UPNP_DEVICE_UUID "-rc",  0, false };
+static UpnpSubscription g_sub_avt = { "", "uuid:" UPNP_DEVICE_UUID "-avt", 0, false };
 
 static UpnpRingBuffer g_ring;
 static volatile bool g_stream_active = false;
@@ -662,6 +674,123 @@ static char *find_header_value(const char *req, const char *header_name) {
     return NULL;
 }
 
+/* ============================================================================
+ * Universal GENA Event Notification (pushes Volume/Mute/Transport state to apps)
+ * ============================================================================ */
+static void send_gena_notify(UpnpSubscription *sub, const char *prop_body) {
+    if (!sub || !sub->active || !sub->callback_url[0]) return;
+
+    char host[256] = "";
+    int port = 80;
+    char path[256] = "/";
+
+    const char *p = sub->callback_url;
+    if (strncmp(p, "http://", 7) == 0) p += 7;
+
+    const char *slash = strchr(p, '/');
+    const char *colon = strchr(p, ':');
+
+    if (colon && (!slash || colon < slash)) {
+        size_t hlen = (size_t)(colon - p);
+        if (hlen < sizeof(host)) {
+            memcpy(host, p, hlen);
+            host[hlen] = '\0';
+        }
+        port = atoi(colon + 1);
+    } else if (slash) {
+        size_t hlen = (size_t)(slash - p);
+        if (hlen < sizeof(host)) {
+            memcpy(host, p, hlen);
+            host[hlen] = '\0';
+        }
+    } else {
+        snprintf(host, sizeof(host), "%s", p);
+    }
+
+    if (slash) {
+        snprintf(path, sizeof(path), "%s", slash);
+    }
+
+    SOCKET s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (s == INVALID_SOCKET) return;
+
+    DWORD tv = 400;
+    setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, (const char *)&tv, sizeof(tv));
+    setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, (const char *)&tv, sizeof(tv));
+
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons((u_short)port);
+    addr.sin_addr.s_addr = inet_addr(host);
+
+    if (addr.sin_addr.s_addr != INADDR_NONE &&
+        connect(s, (struct sockaddr *)&addr, sizeof(addr)) == 0) {
+        char req[2048];
+        size_t body_len = strlen(prop_body);
+        snprintf(req, sizeof(req),
+                 "NOTIFY %s HTTP/1.1\r\n"
+                 "HOST: %s:%d\r\n"
+                 "CONTENT-TYPE: text/xml; charset=\"utf-8\"\r\n"
+                 "CONTENT-LENGTH: %zu\r\n"
+                 "NT: upnp:event\r\n"
+                 "NTS: upnp:propchange\r\n"
+                 "SID: %s\r\n"
+                 "SEQ: %u\r\n"
+                 "Connection: close\r\n\r\n"
+                 "%s",
+                 path, host, port, body_len, sub->sid, sub->seq++, prop_body);
+        send(s, req, (int)strlen(req), 0);
+    }
+    closesocket(s);
+}
+
+static void notify_rendering_control_change(void) {
+    if (!g_sub_rc.active) return;
+    char body[1024];
+    int m = g_upnp_muted ? 1 : 0;
+    int v = g_upnp_volume_pct;
+    snprintf(body, sizeof(body),
+             "<?xml version=\"1.0\" encoding=\"utf-8\"?>\r\n"
+             "<e:propertyset xmlns:e=\"urn:schemas-upnp-org:event-1-0\">\r\n"
+             "  <e:property>\r\n"
+             "    <LastChange>&lt;Event xmlns=&quot;urn:schemas-upnp-org:metadata-1-0/RCS/&quot;&gt;"
+             "&lt;InstanceID val=&quot;0&quot;&gt;"
+             "&lt;Volume channel=&quot;Master&quot; val=&quot;%d&quot;/&gt;"
+             "&lt;Volume channel=&quot;LF&quot; val=&quot;%d&quot;/&gt;"
+             "&lt;Volume channel=&quot;RF&quot; val=&quot;%d&quot;/&gt;"
+             "&lt;Mute channel=&quot;Master&quot; val=&quot;%d&quot;/&gt;"
+             "&lt;Mute channel=&quot;LF&quot; val=&quot;%d&quot;/&gt;"
+             "&lt;Mute channel=&quot;RF&quot; val=&quot;%d&quot;/&gt;"
+             "&lt;/InstanceID&gt;&lt;/Event&gt;</LastChange>\r\n"
+             "  </e:property>\r\n"
+             "</e:propertyset>\r\n",
+             v, v, v, m, m, m);
+    send_gena_notify(&g_sub_rc, body);
+}
+
+static void notify_avtransport_change(void) {
+    if (!g_sub_avt.active) return;
+    const char *state_str = "STOPPED";
+    if (g_transport_state == UPNP_STATE_PLAYING) state_str = "PLAYING";
+    else if (g_transport_state == UPNP_STATE_PAUSED) state_str = "PAUSED_PLAYBACK";
+
+    char body[1024];
+    snprintf(body, sizeof(body),
+             "<?xml version=\"1.0\" encoding=\"utf-8\"?>\r\n"
+             "<e:propertyset xmlns:e=\"urn:schemas-upnp-org:event-1-0\">\r\n"
+             "  <e:property>\r\n"
+             "    <LastChange>&lt;Event xmlns=&quot;urn:schemas-upnp-org:metadata-1-0/AVT/&quot;&gt;"
+             "&lt;InstanceID val=&quot;0&quot;&gt;"
+             "&lt;TransportState val=&quot;%s&quot;/&gt;"
+             "&lt;CurrentTransportActions val=&quot;Play,Stop,Pause&quot;/&gt;"
+             "&lt;/InstanceID&gt;&lt;/Event&gt;</LastChange>\r\n"
+             "  </e:property>\r\n"
+             "</e:propertyset>\r\n",
+             state_str);
+    send_gena_notify(&g_sub_avt, body);
+}
+
 static void send_ssdp_byebye(SOCKET sock, const struct sockaddr_in *dst, const char *nt) {
     char usn[256];
     if (strcmp(nt, "uuid:" UPNP_DEVICE_UUID) == 0 || strcmp(nt, UPNP_DEVICE_UUID) == 0) {
@@ -920,14 +1049,9 @@ static const char kAVTransportXml[] =
     "    <action><name>GetCurrentTransportActions</name></action>\r\n"
     "  </actionList>\r\n"
     "  <serviceStateTable>\r\n"
-    "    <stateVariable sendEvents=\"no\">\r\n"
-    "      <name>TransportState</name>\r\n"
-    "      <dataType>string</dataType>\r\n"
-    "    </stateVariable>\r\n"
-    "    <stateVariable sendEvents=\"no\">\r\n"
-    "      <name>CurrentURI</name>\r\n"
-    "      <dataType>string</dataType>\r\n"
-    "    </stateVariable>\r\n"
+    "    <stateVariable sendEvents=\"yes\"><name>LastChange</name><dataType>string</dataType></stateVariable>\r\n"
+    "    <stateVariable sendEvents=\"no\"><name>TransportState</name><dataType>string</dataType></stateVariable>\r\n"
+    "    <stateVariable sendEvents=\"no\"><name>CurrentURI</name><dataType>string</dataType></stateVariable>\r\n"
     "  </serviceStateTable>\r\n"
     "</scpd>\r\n";
 
@@ -936,19 +1060,84 @@ static const char kRenderingControlXml[] =
     "<scpd xmlns=\"urn:schemas-upnp-org:service-1-0\">\r\n"
     "  <specVersion><major>1</major><minor>0</minor></specVersion>\r\n"
     "  <actionList>\r\n"
-    "    <action><name>SetVolume</name></action>\r\n"
-    "    <action><name>GetVolume</name></action>\r\n"
-    "    <action><name>SetMute</name></action>\r\n"
-    "    <action><name>GetMute</name></action>\r\n"
+    "    <action>\r\n"
+    "      <name>ListPresets</name>\r\n"
+    "      <argumentList>\r\n"
+    "        <argument><name>InstanceID</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_InstanceID</relatedStateVariable></argument>\r\n"
+    "        <argument><name>CurrentPresetNameList</name><direction>out</direction><relatedStateVariable>PresetNameList</relatedStateVariable></argument>\r\n"
+    "      </argumentList>\r\n"
+    "    </action>\r\n"
+    "    <action>\r\n"
+    "      <name>SelectPreset</name>\r\n"
+    "      <argumentList>\r\n"
+    "        <argument><name>InstanceID</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_InstanceID</relatedStateVariable></argument>\r\n"
+    "        <argument><name>PresetName</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_PresetName</relatedStateVariable></argument>\r\n"
+    "      </argumentList>\r\n"
+    "    </action>\r\n"
+    "    <action>\r\n"
+    "      <name>GetMute</name>\r\n"
+    "      <argumentList>\r\n"
+    "        <argument><name>InstanceID</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_InstanceID</relatedStateVariable></argument>\r\n"
+    "        <argument><name>Channel</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_Channel</relatedStateVariable></argument>\r\n"
+    "        <argument><name>CurrentMute</name><direction>out</direction><relatedStateVariable>Mute</relatedStateVariable></argument>\r\n"
+    "      </argumentList>\r\n"
+    "    </action>\r\n"
+    "    <action>\r\n"
+    "      <name>SetMute</name>\r\n"
+    "      <argumentList>\r\n"
+    "        <argument><name>InstanceID</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_InstanceID</relatedStateVariable></argument>\r\n"
+    "        <argument><name>Channel</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_Channel</relatedStateVariable></argument>\r\n"
+    "        <argument><name>DesiredMute</name><direction>in</direction><relatedStateVariable>Mute</relatedStateVariable></argument>\r\n"
+    "      </argumentList>\r\n"
+    "    </action>\r\n"
+    "    <action>\r\n"
+    "      <name>GetVolume</name>\r\n"
+    "      <argumentList>\r\n"
+    "        <argument><name>InstanceID</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_InstanceID</relatedStateVariable></argument>\r\n"
+    "        <argument><name>Channel</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_Channel</relatedStateVariable></argument>\r\n"
+    "        <argument><name>CurrentVolume</name><direction>out</direction><relatedStateVariable>Volume</relatedStateVariable></argument>\r\n"
+    "      </argumentList>\r\n"
+    "    </action>\r\n"
+    "    <action>\r\n"
+    "      <name>SetVolume</name>\r\n"
+    "      <argumentList>\r\n"
+    "        <argument><name>InstanceID</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_InstanceID</relatedStateVariable></argument>\r\n"
+    "        <argument><name>Channel</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_Channel</relatedStateVariable></argument>\r\n"
+    "        <argument><name>DesiredVolume</name><direction>in</direction><relatedStateVariable>Volume</relatedStateVariable></argument>\r\n"
+    "      </argumentList>\r\n"
+    "    </action>\r\n"
     "  </actionList>\r\n"
     "  <serviceStateTable>\r\n"
+    "    <stateVariable sendEvents=\"yes\">\r\n"
+    "      <name>LastChange</name>\r\n"
+    "      <dataType>string</dataType>\r\n"
+    "    </stateVariable>\r\n"
     "    <stateVariable sendEvents=\"no\">\r\n"
-    "      <name>Volume</name>\r\n"
-    "      <dataType>ui2</dataType>\r\n"
+    "      <name>PresetNameList</name>\r\n"
+    "      <dataType>string</dataType>\r\n"
     "    </stateVariable>\r\n"
     "    <stateVariable sendEvents=\"no\">\r\n"
     "      <name>Mute</name>\r\n"
     "      <dataType>boolean</dataType>\r\n"
+    "    </stateVariable>\r\n"
+    "    <stateVariable sendEvents=\"no\">\r\n"
+    "      <name>Volume</name>\r\n"
+    "      <dataType>ui2</dataType>\r\n"
+    "      <allowedValueRange><minimum>0</minimum><maximum>100</maximum><step>1</step></allowedValueRange>\r\n"
+    "    </stateVariable>\r\n"
+    "    <stateVariable sendEvents=\"no\">\r\n"
+    "      <name>A_ARG_TYPE_Channel</name>\r\n"
+    "      <dataType>string</dataType>\r\n"
+    "      <allowedValueList><allowedValue>Master</allowedValue><allowedValue>LF</allowedValue><allowedValue>RF</allowedValue></allowedValueList>\r\n"
+    "    </stateVariable>\r\n"
+    "    <stateVariable sendEvents=\"no\">\r\n"
+    "      <name>A_ARG_TYPE_InstanceID</name>\r\n"
+    "      <dataType>ui4</dataType>\r\n"
+    "    </stateVariable>\r\n"
+    "    <stateVariable sendEvents=\"no\">\r\n"
+    "      <name>A_ARG_TYPE_PresetName</name>\r\n"
+    "      <dataType>string</dataType>\r\n"
+    "      <allowedValueList><allowedValue>FactoryDefaults</allowedValue></allowedValueList>\r\n"
     "    </stateVariable>\r\n"
     "  </serviceStateTable>\r\n"
     "</scpd>\r\n";
@@ -1019,22 +1208,26 @@ static void xml_unescape_uri(char *uri) {
     }
 }
 
-static void handle_soap_avtransport(SOCKET client, const char *req) {
-    /* Extract exact SOAP action name from SOAPACTION header to avoid matching metadata text */
-    char action[64] = "";
+static void extract_soap_action(const char *req, char *out_action, size_t max_len) {
+    out_action[0] = '\0';
     char *sa = find_header_value(req, "SOAPACTION");
     if (sa) {
         char *hash = strchr(sa, '#');
         if (hash) {
             hash++;
-            int i = 0;
-            while (hash[i] && hash[i] != '"' && hash[i] != '\r' && hash[i] != '\n' && i < 63) {
-                action[i] = hash[i];
+            size_t i = 0;
+            while (hash[i] && hash[i] != '"' && hash[i] != '\r' && hash[i] != '\n' && i < max_len - 1) {
+                out_action[i] = hash[i];
                 i++;
             }
-            action[i] = '\0';
+            out_action[i] = '\0';
         }
     }
+}
+
+static void handle_soap_avtransport(SOCKET client, const char *req) {
+    char action[64] = "";
+    extract_soap_action(req, action, sizeof(action));
 
     const char *body = strstr(req, "\r\n\r\n");
     if (!body) body = req;
@@ -1112,16 +1305,19 @@ static void handle_soap_avtransport(SOCKET client, const char *req) {
         }
         cabin_log("UPnP: Play action received. Overriding game multimedia radio.");
         send_soap_response(client, "Play", "AVTransport", "");
+        notify_avtransport_change();
     } else if (strcmp(action, "Pause") == 0) {
         g_transport_state = UPNP_STATE_PAUSED;
         cabin_log("UPnP: Pause action received. Reverting to game radio.");
         send_soap_response(client, "Pause", "AVTransport", "");
+        notify_avtransport_change();
     } else if (strcmp(action, "Stop") == 0) {
         g_transport_state = UPNP_STATE_STOPPED;
         stop_audio_stream();
         g_played_samples = 0;
         cabin_log("UPnP: Stop action received. Reverting to game radio.");
         send_soap_response(client, "Stop", "AVTransport", "");
+        notify_avtransport_change();
     } else if (strcmp(action, "GetTransportInfo") == 0) {
         const char *state_str = "STOPPED";
         if (g_transport_state == UPNP_STATE_PLAYING) state_str = "PLAYING";
@@ -1187,34 +1383,86 @@ static void handle_soap_avtransport(SOCKET client, const char *req) {
     }
 }
 
-static void handle_soap_rendering(SOCKET client, const char *body) {
-    if (strstr(body, "SetVolume")) {
-        const char *vol_tag = strstr(body, "<DesiredVolume>");
+static void handle_soap_rendering(SOCKET client, const char *req) {
+    char action[64] = "";
+    extract_soap_action(req, action, sizeof(action));
+
+    const char *body = strstr(req, "\r\n\r\n");
+    if (!body) body = req;
+
+    if (strcmp(action, "SetVolume") == 0 || (!action[0] && strstr(body, "SetVolume"))) {
+        const char *vol_tag = strstr(body, "<DesiredVolume");
         if (vol_tag) {
-            int vol = atoi(vol_tag + 15);
-            if (vol < 0) vol = 0;
-            if (vol > 100) vol = 100;
-            g_upnp_volume = (float)vol / 100.0f;
-            cabin_log("UPnP: SetVolume action received: %d%%", vol);
+            const char *val = strchr(vol_tag, '>');
+            if (val) {
+                int vol = atoi(val + 1);
+                if (vol < 0) vol = 0;
+                if (vol > 100) vol = 100;
+                g_upnp_volume_pct = vol;
+                /* Natural quadratic audio taper: 50% slider = -12 dB (0.25 amplitude), 100% = 1.0 */
+                float norm = (float)vol / 100.0f;
+                g_upnp_volume = norm * norm;
+                cabin_log("UPnP: SetVolume -> %d%% (gain=%.3f)", vol, g_upnp_volume);
+            }
         }
         send_soap_response(client, "SetVolume", "RenderingControl", "");
-    } else if (strstr(body, "GetVolume")) {
+        notify_rendering_control_change();
+    } else if (strcmp(action, "GetVolume") == 0 || (!action[0] && strstr(body, "GetVolume"))) {
         char inner[128];
-        snprintf(inner, sizeof(inner), "<CurrentVolume>%d</CurrentVolume>", (int)(g_upnp_volume * 100.0f + 0.5f));
+        snprintf(inner, sizeof(inner), "<CurrentVolume>%d</CurrentVolume>", g_upnp_volume_pct);
         send_soap_response(client, "GetVolume", "RenderingControl", inner);
-    } else if (strstr(body, "SetMute")) {
-        const char *mute_tag = strstr(body, "<DesiredMute>");
+    } else if (strcmp(action, "SetVolumeDB") == 0) {
+        const char *vol_tag = strstr(body, "<DesiredVolume");
+        if (vol_tag) {
+            const char *val = strchr(vol_tag, '>');
+            if (val) {
+                int db_raw = atoi(val + 1);
+                float db = (float)db_raw / 256.0f;
+                if (db < -60.0f) {
+                    g_upnp_volume = 0.0f;
+                    g_upnp_volume_pct = 0;
+                } else {
+                    if (db > 0.0f) db = 0.0f;
+                    g_upnp_volume = powf(10.0f, db / 20.0f);
+                    g_upnp_volume_pct = (int)(sqrtf(g_upnp_volume) * 100.0f + 0.5f);
+                }
+                cabin_log("UPnP: SetVolumeDB -> %d (gain=%.3f)", db_raw, g_upnp_volume);
+            }
+        }
+        send_soap_response(client, "SetVolumeDB", "RenderingControl", "");
+        notify_rendering_control_change();
+    } else if (strcmp(action, "GetVolumeDB") == 0) {
+        int db_raw = (g_upnp_volume <= 0.0001f) ? -15360 : (int)(20.0f * log10f(g_upnp_volume) * 256.0f);
+        char inner[128];
+        snprintf(inner, sizeof(inner), "<CurrentVolume>%d</CurrentVolume>", db_raw);
+        send_soap_response(client, "GetVolumeDB", "RenderingControl", inner);
+    } else if (strcmp(action, "GetVolumeDBRange") == 0) {
+        send_soap_response(client, "GetVolumeDBRange", "RenderingControl",
+                           "<MinValue>-15360</MinValue><MaxValue>0</MaxValue>");
+    } else if (strcmp(action, "SetMute") == 0 || (!action[0] && strstr(body, "SetMute"))) {
+        const char *mute_tag = strstr(body, "<DesiredMute");
         if (mute_tag) {
-            g_upnp_muted = (atoi(mute_tag + 13) != 0);
-            cabin_log("UPnP: SetMute action received: %s", g_upnp_muted ? "MUTED" : "UNMUTED");
+            const char *val = strchr(mute_tag, '>');
+            if (val) {
+                val++;
+                while (*val == ' ' || *val == '\t') val++;
+                g_upnp_muted = (*val == '1' || *val == 't' || *val == 'T' || *val == 'y' || *val == 'Y');
+                cabin_log("UPnP: SetMute -> %s", g_upnp_muted ? "MUTED" : "UNMUTED");
+            }
         }
         send_soap_response(client, "SetMute", "RenderingControl", "");
-    } else if (strstr(body, "GetMute")) {
+        notify_rendering_control_change();
+    } else if (strcmp(action, "GetMute") == 0 || (!action[0] && strstr(body, "GetMute"))) {
         char inner[128];
         snprintf(inner, sizeof(inner), "<CurrentMute>%d</CurrentMute>", g_upnp_muted ? 1 : 0);
         send_soap_response(client, "GetMute", "RenderingControl", inner);
+    } else if (strcmp(action, "ListPresets") == 0 || (!action[0] && strstr(body, "ListPresets"))) {
+        send_soap_response(client, "ListPresets", "RenderingControl",
+                           "<CurrentPresetNameList>FactoryDefaults</CurrentPresetNameList>");
+    } else if (strcmp(action, "SelectPreset") == 0 || (!action[0] && strstr(body, "SelectPreset"))) {
+        send_soap_response(client, "SelectPreset", "RenderingControl", "");
     } else {
-        send_http_response(client, 404, "text/plain", "Not Found");
+        send_soap_response(client, action[0] ? action : "GetVolume", "RenderingControl", "");
     }
 }
 
@@ -1260,20 +1508,47 @@ static unsigned __stdcall upnp_http_worker(void *unused) {
         sscanf(buffer, "%15s %255s", req_method, req_url);
         cabin_log("UPnP: HTTP %s %s from %s", req_method, req_url, inet_ntoa(client_addr.sin_addr));
 
-        /* GENA Event Subscription Support */
+        /* GENA Event Subscription Support (with active LastChange initial NOTIFY) */
         if (strcmp(req_method, "SUBSCRIBE") == 0) {
+            UpnpSubscription *sub = strstr(req_url, "RenderingControl") ? &g_sub_rc : &g_sub_avt;
+            char *cb = find_header_value(buffer, "CALLBACK");
+            if (cb) {
+                const char *lt = strchr(cb, '<');
+                const char *gt = lt ? strchr(lt + 1, '>') : NULL;
+                if (lt && gt && (size_t)(gt - lt - 1) < sizeof(sub->callback_url)) {
+                    size_t clen = (size_t)(gt - lt - 1);
+                    memcpy(sub->callback_url, lt + 1, clen);
+                    sub->callback_url[clen] = '\0';
+                    sub->seq = 0;
+                    sub->active = true;
+                }
+            } else {
+                sub->active = true;
+            }
+
             char response[512];
             snprintf(response, sizeof(response),
                      "HTTP/1.1 200 OK\r\n"
                      "Server: Windows/10.0 UPnP/1.0 ETS2CabinRadio/1.2\r\n"
-                     "SID: uuid:" UPNP_DEVICE_UUID "-sub1\r\n"
+                     "SID: %s\r\n"
                      "TIMEOUT: Second-1800\r\n"
                      "Content-Length: 0\r\n"
-                     "Connection: close\r\n\r\n");
+                     "Connection: close\r\n\r\n",
+                     sub->sid);
             send(client, response, (int)strlen(response), 0);
             closesocket(client);
+
+            /* Immediately send initial GENA event state (required by UPnP spec for Volume/Transport UI) */
+            if (sub == &g_sub_rc) {
+                notify_rendering_control_change();
+            } else {
+                notify_avtransport_change();
+            }
             continue;
         } else if (strcmp(req_method, "UNSUBSCRIBE") == 0) {
+            if (strstr(req_url, "RenderingControl")) g_sub_rc.active = false;
+            else g_sub_avt.active = false;
+
             char response[256];
             snprintf(response, sizeof(response),
                      "HTTP/1.1 200 OK\r\n"
@@ -1486,6 +1761,7 @@ static unsigned __stdcall upnp_stream_worker(void *unused) {
     /* Only update global state if this worker belongs to current active generation */
     if (t_my_gen == g_stream_gen && g_transport_state == UPNP_STATE_PLAYING) {
         g_transport_state = UPNP_STATE_STOPPED;
+        notify_avtransport_change();
     }
     cabin_log("UPnP: Stream finished or disconnected.");
     return 0;
