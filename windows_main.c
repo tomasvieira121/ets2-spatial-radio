@@ -628,49 +628,55 @@ static LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lp
         SendMessageA(g_hwnd_position_slider, TBM_SETRANGE, TRUE, MAKELPARAM(0, 200));
         SendMessageA(g_hwnd_position_slider, TBM_SETPOS, TRUE, (LPARAM)(int)((g_position + 1.0f) * 100.0f + 0.5f));
 
+        /* Audio Streaming Card */
+        HWND grp_stream = CreateWindowExA(0, "BUTTON", "Audio Streaming",
+                                          WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
+                                          24, 348, 636, 60, hwnd, NULL, inst, NULL);
+        SendMessageA(grp_stream, WM_SETFONT, (WPARAM)g_font_section, TRUE);
+
+        g_hwnd_chk_upnp = CreateWindowExA(
+            0, "BUTTON", "Enable UPnP / DLNA Renderer (Stream audio from local network music players).",
+            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+            42, 374, 596, 22, hwnd, (HMENU)ID_CHK_UPNP, inst, NULL);
+        SendMessageA(g_hwnd_chk_upnp, WM_SETFONT, (WPARAM)g_font_body, TRUE);
+        SendMessageA(g_hwnd_chk_upnp, BM_SETCHECK, g_upnp_enabled ? BST_CHECKED : BST_UNCHECKED, 0);
+
         /* Launch Card */
-        HWND grp_live = CreateWindowExA(0, "BUTTON", "Launch & Live Injection",
+        HWND grp_live = CreateWindowExA(0, "BUTTON", "Launch / Live Injection",
                                         WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
-                                        24, 348, 636, 188, hwnd, NULL, inst, NULL);
+                                        24, 420, 636, 150, hwnd, NULL, inst, NULL);
         SendMessageA(grp_live, WM_SETFONT, (WPARAM)g_font_section, TRUE);
 
         HWND live_desc = CreateWindowExA(
             0, "STATIC",
-            "Simulates Front Left/Right dash & door speakers, Rear Left/Right sleeper speakers, under-seat sub, and cabin glass reflections—reacting in 360 degrees to camera rotation and windows.",
-            WS_CHILD | WS_VISIBLE, 42, 374, 596, 38, hwnd, NULL, inst, NULL);
+            "Simulates Front Left/Right dash and door speakers, Rear Left/Right sleeper speakers, under-seat sub, and cabin glass reflections - reacting in 360 degrees to camera rotation and windows.",
+            WS_CHILD | WS_VISIBLE, 42, 446, 596, 38, hwnd, NULL, inst, NULL);
         SendMessageA(live_desc, WM_SETFONT, (WPARAM)g_font_body, TRUE);
-
-        g_hwnd_chk_upnp = CreateWindowExA(
-            0, "BUTTON", "Enable UPnP / DLNA Cabin Renderer (Stream audio from phone to truck cabin)",
-            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-            42, 412, 596, 22, hwnd, (HMENU)ID_CHK_UPNP, inst, NULL);
-        SendMessageA(g_hwnd_chk_upnp, WM_SETFONT, (WPARAM)g_font_body, TRUE);
-        SendMessageA(g_hwnd_chk_upnp, BM_SETCHECK, g_upnp_enabled ? BST_CHECKED : BST_UNCHECKED, 0);
 
         g_hwnd_status = CreateWindowExA(
             0, "STATIC",
-            "Ready. Adjust presets or sliders at any time—even while ETS2 is running.",
-            WS_CHILD | WS_VISIBLE, 42, 438, 596, 20, hwnd, NULL, inst, NULL);
+            "Ready. Adjust presets or sliders at any time - even while ETS2 is running.",
+            WS_CHILD | WS_VISIBLE, 42, 488, 596, 20, hwnd, NULL, inst, NULL);
         SendMessageA(g_hwnd_status, WM_SETFONT, (WPARAM)g_font_caption, TRUE);
 
         HWND btn_launch = CreateWindowExA(0, "BUTTON", "Launch / Attach Live DSP",
                                           WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
-                                          42, 466, 195, 38, hwnd, (HMENU)ID_BTN_LAUNCH, inst, NULL);
+                                          42, 516, 195, 38, hwnd, (HMENU)ID_BTN_LAUNCH, inst, NULL);
         SendMessageA(btn_launch, WM_SETFONT, (WPARAM)g_font_section, TRUE);
 
         g_hwnd_btn_plugin = CreateWindowExA(0, "BUTTON", "Install Steam Auto-Plugin",
                                             WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                                            247, 466, 175, 38, hwnd, (HMENU)ID_BTN_PLUGIN, inst, NULL);
+                                            247, 516, 175, 38, hwnd, (HMENU)ID_BTN_PLUGIN, inst, NULL);
         SendMessageA(g_hwnd_btn_plugin, WM_SETFONT, (WPARAM)g_font_body, TRUE);
 
         HWND btn_log = CreateWindowExA(0, "BUTTON", "Open DSP Log",
                                        WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                                       432, 466, 100, 38, hwnd, (HMENU)ID_BTN_OPEN_LOG, inst, NULL);
+                                       432, 516, 100, 38, hwnd, (HMENU)ID_BTN_OPEN_LOG, inst, NULL);
         SendMessageA(btn_log, WM_SETFONT, (WPARAM)g_font_body, TRUE);
 
         HWND btn_music = CreateWindowExA(0, "BUTTON", "Music Folder",
                                          WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                                         540, 466, 100, 38, hwnd, (HMENU)ID_BTN_OPEN_MUSIC, inst, NULL);
+                                         540, 516, 100, 38, hwnd, (HMENU)ID_BTN_OPEN_MUSIC, inst, NULL);
         SendMessageA(btn_music, WM_SETFONT, (WPARAM)g_font_body, TRUE);
 
         update_labels();
@@ -774,7 +780,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE prev, LPSTR cmdline, int show) 
     RegisterClassExA(&wc);
 
     DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
-    RECT rc = { 0, 0, 684, 558 };
+    RECT rc = { 0, 0, 684, 608 };
     AdjustWindowRect(&rc, style, FALSE);
 
     HWND hwnd = CreateWindowExA(
